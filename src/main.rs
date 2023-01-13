@@ -3,10 +3,14 @@ pub mod bitcoind_client;
 mod cli;
 mod convert;
 mod disk;
+#[cfg(feature = "electrum")]
+pub mod electrum_client;
 mod hex_utils;
 
 use crate::bitcoind_client::BitcoindClient;
 use crate::disk::FilesystemLogger;
+#[cfg(feature = "electrum")]
+use crate::electrum_client::ElectrumClient;
 use bitcoin::blockdata::constants::genesis_block;
 use bitcoin::blockdata::transaction::Transaction;
 use bitcoin::consensus::encode;
@@ -81,6 +85,16 @@ pub(crate) struct PaymentInfo {
 
 pub(crate) type PaymentInfoStorage = Arc<Mutex<HashMap<PaymentHash, PaymentInfo>>>;
 
+#[cfg(feature = "electrum")]
+type ChainMonitor = chainmonitor::ChainMonitor<
+	InMemorySigner,
+	Arc<dyn Filter + Send + Sync>,
+	Arc<ElectrumClient>,
+	Arc<ElectrumClient>,
+	Arc<FilesystemLogger>,
+	Arc<FilesystemPersister>,
+>;
+#[cfg(not(feature = "electrum"))]
 type ChainMonitor = chainmonitor::ChainMonitor<
 	InMemorySigner,
 	Arc<dyn Filter + Send + Sync>,
@@ -90,6 +104,16 @@ type ChainMonitor = chainmonitor::ChainMonitor<
 	Arc<FilesystemPersister>,
 >;
 
+#[cfg(feature = "electrum")]
+pub(crate) type PeerManager = SimpleArcPeerManager<
+	SocketDescriptor,
+	ChainMonitor,
+	ElectrumClient,
+	ElectrumClient,
+	dyn chain::Access + Send + Sync,
+	FilesystemLogger,
+>;
+#[cfg(not(feature = "electrum"))]
 pub(crate) type PeerManager = SimpleArcPeerManager<
 	SocketDescriptor,
 	ChainMonitor,
@@ -99,6 +123,10 @@ pub(crate) type PeerManager = SimpleArcPeerManager<
 	FilesystemLogger,
 >;
 
+#[cfg(feature = "electrum")]
+pub(crate) type ChannelManager =
+	SimpleArcChannelManager<ChainMonitor, ElectrumClient, ElectrumClient, FilesystemLogger>;
+#[cfg(not(feature = "electrum"))]
 pub(crate) type ChannelManager =
 	SimpleArcChannelManager<ChainMonitor, BitcoindClient, BitcoindClient, FilesystemLogger>;
 
@@ -423,9 +451,23 @@ async fn start_ldk() {
 		return;
 	}
 
+	#[cfg(feature = "electrum")]
+	let electrum_client =
+		match ElectrumClient::new(args.network, tokio::runtime::Handle::current()).await {
+			Ok(client) => Arc::new(client),
+			Err(e) => {
+				println!("Failed to connect to electrum client: {}", e);
+				return;
+			}
+		};
+
 	// ## Setup
 	// Step 1: Initialize the FeeEstimator
 
+	#[cfg(feature = "electrum")]
+	// ElectrumClient implements the FeeEstimator trait, so it'll act as our fee estimator.
+	let fee_estimator = electrum_client.clone();
+	#[cfg(not(feature = "electrum"))]
 	// BitcoindClient implements the FeeEstimator trait, so it'll act as our fee estimator.
 	let fee_estimator = bitcoind_client.clone();
 
@@ -434,6 +476,11 @@ async fn start_ldk() {
 
 	// Step 3: Initialize the BroadcasterInterface
 
+	#[cfg(feature = "electrum")]
+	// ElectrumClient implements the BroadcasterInterface trait, so it'll act as our transaction
+	// broadcaster.
+	let broadcaster = electrum_client.clone();
+	#[cfg(not(feature = "electrum"))]
 	// BitcoindClient implements the BroadcasterInterface trait, so it'll act as our transaction
 	// broadcaster.
 	let broadcaster = bitcoind_client.clone();
